@@ -1,0 +1,288 @@
+# =============================================================
+# JAVARI AUDITOPS - Manual Audit Workflow
+# Trigger: Manual via GitHub UI or API
+# =============================================================
+
+name: AuditOps Manual Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Environment to audit'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+          - staging
+      scope:
+        description: 'Audit scope'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - domain
+          - tier
+      domain:
+        description: 'Domain (required if scope=domain)'
+        required: false
+        type: string
+      tier:
+        description: 'Tier (required if scope=tier)'
+        required: false
+        type: choice
+        options:
+          - primary
+          - product
+          - subdomain
+          - apps
+          - collector
+      includeModules:
+        description: 'Modules to include (CSV)'
+        required: false
+        default: ''
+        type: string
+      excludeModules:
+        description: 'Modules to exclude (CSV)'
+        required: false
+        default: ''
+        type: string
+      maxRuntimeMinutes:
+        description: 'Max runtime in minutes'
+        required: false
+        default: '60'
+        type: string
+      notifySlack:
+        description: 'Send Slack notification'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '9'
+
+jobs:
+  audit:
+    name: Run Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    
+    outputs:
+      run_id: ${{ steps.audit.outputs.run_id }}
+      go_no_go: ${{ steps.audit.outputs.go_no_go }}
+      blockers: ${{ steps.audit.outputs.blockers }}
+      total_issues: ${{ steps.audit.outputs.total_issues }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @auditops/runner exec playwright install --with-deps chromium
+
+      - name: Generate auth state
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
+        run: |
+          echo "Generating authentication state for protected crawl..."
+          pnpm --filter @auditops/runner run auth:generate
+
+      - name: Run audit
+        id: audit
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
+          AUDIT_ADMIN_EMAIL: ${{ secrets.AUDIT_ADMIN_EMAIL }}
+          AUDIT_ADMIN_PASSWORD: ${{ secrets.AUDIT_ADMIN_PASSWORD }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Starting audit run..."
+          echo "Environment: ${{ inputs.env }}"
+          echo "Scope: ${{ inputs.scope }}"
+          
+          ARGS="--env ${{ inputs.env }} --scope ${{ inputs.scope }}"
+          
+          if [ -n "${{ inputs.domain }}" ]; then
+            ARGS="$ARGS --domain ${{ inputs.domain }}"
+          fi
+          
+          if [ -n "${{ inputs.tier }}" ]; then
+            ARGS="$ARGS --tier ${{ inputs.tier }}"
+          fi
+          
+          if [ -n "${{ inputs.includeModules }}" ]; then
+            ARGS="$ARGS --includeModules ${{ inputs.includeModules }}"
+          fi
+          
+          if [ -n "${{ inputs.excludeModules }}" ]; then
+            ARGS="$ARGS --excludeModules ${{ inputs.excludeModules }}"
+          fi
+          
+          ARGS="$ARGS --maxRuntimeMinutes ${{ inputs.maxRuntimeMinutes }}"
+          
+          pnpm --filter @auditops/runner auditops run $ARGS
+          
+          # Parse outputs from report
+          if [ -f "packages/runner/output/report.json" ]; then
+            RUN_ID=$(jq -r '.run.id' packages/runner/output/report.json)
+            GO_NO_GO=$(jq -r '.run.goNoGo // "UNKNOWN"' packages/runner/output/report.json)
+            BLOCKERS=$(jq -r '.summary.BLOCKER // 0' packages/runner/output/report.json)
+            TOTAL=$(jq -r '.summary.total // 0' packages/runner/output/report.json)
+            
+            echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+            echo "go_no_go=$GO_NO_GO" >> $GITHUB_OUTPUT
+            echo "blockers=$BLOCKERS" >> $GITHUB_OUTPUT
+            echo "total_issues=$TOTAL" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditops-report-${{ github.run_number }}
+          path: |
+            packages/runner/output/report.json
+            packages/runner/output/report.html
+            packages/runner/output/issues.csv
+            packages/runner/output/summary.md
+            packages/runner/output/claude_fix_packet.json
+            packages/runner/output/claude_fix_packet.md
+            packages/runner/output/screenshots/
+            packages/runner/output/har/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Save results to Supabase
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          if [ -f "packages/runner/output/report.json" ]; then
+            pnpm --filter @auditops/runner run save-results
+          fi
+
+      - name: Generate fix packet for Javari AI
+        if: success()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          echo "Generating fix packet for Javari AI autopilot..."
+          pnpm --filter @auditops/runner run generate-fix-packet
+
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: audit
+    if: always() && inputs.notifySlack
+    
+    steps:
+      - name: Send Slack notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ needs.audit.result }}"
+          GO_NO_GO="${{ needs.audit.outputs.go_no_go }}"
+          BLOCKERS="${{ needs.audit.outputs.blockers }}"
+          TOTAL="${{ needs.audit.outputs.total_issues }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="✅"
+            COLOR="good"
+          else
+            EMOJI="❌"
+            COLOR="danger"
+          fi
+          
+          if [ "$GO_NO_GO" = "RED" ]; then
+            EMOJI="🔴"
+            COLOR="danger"
+          elif [ "$GO_NO_GO" = "YELLOW" ]; then
+            EMOJI="🟡"
+            COLOR="warning"
+          elif [ "$GO_NO_GO" = "GREEN" ]; then
+            EMOJI="🟢"
+            COLOR="good"
+          fi
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{
+              \"attachments\": [{
+                \"color\": \"$COLOR\",
+                \"blocks\": [
+                  {
+                    \"type\": \"header\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"$EMOJI Javari AuditOps - ${{ inputs.scope }} audit complete\"
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"fields\": [
+                      {\"type\": \"mrkdwn\", \"text\": \"*Status:* $GO_NO_GO\"},
+                      {\"type\": \"mrkdwn\", \"text\": \"*Blockers:* $BLOCKERS\"},
+                      {\"type\": \"mrkdwn\", \"text\": \"*Total Issues:* $TOTAL\"},
+                      {\"type\": \"mrkdwn\", \"text\": \"*Environment:* ${{ inputs.env }}\"}
+                    ]
+                  },
+                  {
+                    \"type\": \"actions\",
+                    \"elements\": [
+                      {
+                        \"type\": \"button\",
+                        \"text\": {\"type\": \"plain_text\", \"text\": \"View Run\"},
+                        \"url\": \"$RUN_URL\"
+                      }
+                    ]
+                  }
+                ]
+              }]
+            }" \
+            $SLACK_WEBHOOK_URL
+
+  trigger-autopilot:
+    name: Trigger Javari AI Autopilot
+    runs-on: ubuntu-latest
+    needs: audit
+    if: success() && needs.audit.outputs.total_issues > 0
+    
+    steps:
+      - name: Notify Javari AI
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          echo "Notifying Javari AI of new audit results..."
+          echo "Run ID: ${{ needs.audit.outputs.run_id }}"
+          echo "Go/No-Go: ${{ needs.audit.outputs.go_no_go }}"
+          echo "Blockers: ${{ needs.audit.outputs.blockers }}"
+          echo "Total Issues: ${{ needs.audit.outputs.total_issues }}"
+          
+          # Javari AI will pick up from Supabase and process
+          # Future: Direct API call to Javari AI service
