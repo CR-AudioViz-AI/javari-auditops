@@ -1,0 +1,71 @@
+{
+  "name": "javari-auditops",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Autonomous QA Platform - Continuous auditing, self-healing, and AI-driven remediation for CRAudioVizAI ecosystem",
+  "author": "CR AudioViz AI, LLC",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean && rm -rf node_modules",
+    "auditops": "pnpm --filter @auditops/runner auditops",
+    "console:dev": "pnpm --filter @auditops/console dev",
+    "console:build": "pnpm --filter @auditops/console build",
+    "db:migrate": "pnpm --filter @auditops/db migrate",
+    "db:seed": "pnpm --filter @auditops/db seed",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.0",
+    "husky": "^9.0.0",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CR-AudioViz-AI/javari-auditops.git"
+  },
+  "keywords": [
+    "audit",
+    "qa",
+    "testing",
+    "automation",
+    "playwright",
+    "lighthouse",
+    "seo",
+    "accessibility",
+    "security",
+    "craudiovizai",
+    "javari"
+  ]
+}
