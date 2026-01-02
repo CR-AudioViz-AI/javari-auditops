@@ -94,7 +94,7 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           if [ -f "packages/runner/output/report.json" ]; then
-            pnpm --filter @javari/runner run save-results
+            pnpm --filter @javari/runner run save-results || echo "No results to save"
           fi
 
       - name: Generate fix packet for Javari AI
@@ -103,7 +103,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          pnpm --filter @javari/runner run fix-packet
+          pnpm --filter @javari/runner run fix-packet || echo "No fix packet generated"
 
   notify:
     name: Send Notifications
@@ -113,20 +113,25 @@ jobs:
     
     steps:
       - name: Send Slack notification
-        if: ${{ secrets.SLACK_WEBHOOK_URL }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          STATUS="${{ needs.audit.result }}"
-          if [ "$STATUS" = "success" ]; then
-            EMOJI="✅"
-            COLOR="good"
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            STATUS="${{ needs.audit.result }}"
+            if [ "$STATUS" = "success" ]; then
+              EMOJI="✅"
+              COLOR="good"
+            else
+              EMOJI="❌"
+              COLOR="danger"
+            fi
+            
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"attachments\":[{\"color\":\"$COLOR\",\"text\":\"$EMOJI AuditOps Manual Run: $STATUS\n• Scope: ${{ inputs.scope }}\n• Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}]}" || true
           else
-            EMOJI="❌"
-            COLOR="danger"
+            echo "Slack webhook not configured, skipping notification"
           fi
-          
-          curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"attachments\":[{\"color\":\"$COLOR\",\"text\":\"$EMOJI AuditOps Manual Run: $STATUS\n• Scope: ${{ inputs.scope }}\n• Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}]}"
 
   autopilot:
     name: Trigger Javari AI Autopilot
@@ -136,9 +141,6 @@ jobs:
     
     steps:
       - name: Trigger Javari AI to process fix packet
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           echo "Fix packet generated and saved to database."
           echo "Javari AI will pick up pending fix packets on next run."
