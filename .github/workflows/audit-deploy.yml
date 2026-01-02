@@ -1,0 +1,250 @@
+# =============================================================
+# JAVARI AUDITOPS - Deploy-Triggered Audit
+# Trigger: Vercel webhook on production deployment
+# =============================================================
+
+name: AuditOps Deploy Trigger
+
+on:
+  # Triggered via repository dispatch from Vercel webhook
+  repository_dispatch:
+    types: [vercel_deploy]
+  
+  # Also allow workflow call from other workflows
+  workflow_call:
+    inputs:
+      domain:
+        description: 'Domain that was deployed'
+        required: true
+        type: string
+      deployment_url:
+        description: 'Full deployment URL'
+        required: false
+        type: string
+      git_sha:
+        description: 'Git SHA of deployment'
+        required: false
+        type: string
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '9'
+
+jobs:
+  deploy-audit:
+    name: Audit Deployed Domain
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    steps:
+      - name: Extract deployment info
+        id: info
+        run: |
+          # From repository_dispatch
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            DOMAIN="${{ github.event.client_payload.domain }}"
+            DEPLOYMENT_URL="${{ github.event.client_payload.deployment_url }}"
+            GIT_SHA="${{ github.event.client_payload.git_sha }}"
+          # From workflow_call
+          else
+            DOMAIN="${{ inputs.domain }}"
+            DEPLOYMENT_URL="${{ inputs.deployment_url }}"
+            GIT_SHA="${{ inputs.git_sha }}"
+          fi
+          
+          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+          echo "deployment_url=$DEPLOYMENT_URL" >> $GITHUB_OUTPUT
+          echo "git_sha=$GIT_SHA" >> $GITHUB_OUTPUT
+          
+          echo "📦 Deployment detected:"
+          echo "  Domain: $DOMAIN"
+          echo "  URL: $DEPLOYMENT_URL"
+          echo "  SHA: $GIT_SHA"
+
+      - name: Validate domain
+        run: |
+          DOMAIN="${{ steps.info.outputs.domain }}"
+          if [ -z "$DOMAIN" ]; then
+            echo "❌ No domain specified in webhook payload"
+            exit 1
+          fi
+          echo "✅ Domain validated: $DOMAIN"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright
+        run: pnpm --filter @auditops/runner exec playwright install --with-deps chromium
+
+      - name: Wait for deployment to stabilize
+        run: |
+          echo "⏳ Waiting 30 seconds for deployment to stabilize..."
+          sleep 30
+
+      - name: Run targeted audit
+        id: audit
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          DOMAIN="${{ steps.info.outputs.domain }}"
+          echo "🔍 Running targeted audit on: $DOMAIN"
+          
+          pnpm --filter @auditops/runner auditops run \
+            --env prod \
+            --scope domain \
+            --domain "$DOMAIN" \
+            --includeModules "crawlLinkIntegrity,seoMeta,lighthouse,securityHeaders" \
+            --triggered-by deploy \
+            --maxRuntimeMinutes 15
+          
+          # Check for blockers
+          if [ -f "packages/runner/output/report.json" ]; then
+            BLOCKERS=$(jq -r '.summary.BLOCKER // 0' packages/runner/output/report.json)
+            GO_NO_GO=$(jq -r '.run.goNoGo // "UNKNOWN"' packages/runner/output/report.json)
+            
+            echo "blockers=$BLOCKERS" >> $GITHUB_OUTPUT
+            echo "go_no_go=$GO_NO_GO" >> $GITHUB_OUTPUT
+            
+            echo "📊 Audit Results:"
+            echo "  Go/No-Go: $GO_NO_GO"
+            echo "  Blockers: $BLOCKERS"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditops-deploy-${{ steps.info.outputs.domain }}-${{ github.run_number }}
+          path: packages/runner/output/**
+          retention-days: 7
+
+      - name: Save to Supabase
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: pnpm --filter @auditops/runner run save-results
+
+      - name: Check deployment gate
+        id: gate
+        run: |
+          BLOCKERS="${{ steps.audit.outputs.blockers }}"
+          GO_NO_GO="${{ steps.audit.outputs.go_no_go }}"
+          
+          # In warn-only mode, we don't fail the workflow
+          # Change this to `exit 1` when ready for blocking mode
+          if [ "$GO_NO_GO" = "RED" ]; then
+            echo "🔴 DEPLOYMENT GATE: RED - $BLOCKERS blockers found"
+            echo "gate_status=RED" >> $GITHUB_OUTPUT
+            # Uncomment next line to enable blocking:
+            # exit 1
+          elif [ "$GO_NO_GO" = "YELLOW" ]; then
+            echo "🟡 DEPLOYMENT GATE: YELLOW - High issues detected"
+            echo "gate_status=YELLOW" >> $GITHUB_OUTPUT
+          else
+            echo "🟢 DEPLOYMENT GATE: GREEN - All clear"
+            echo "gate_status=GREEN" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post comment to PR (if applicable)
+        if: github.event.client_payload.pr_number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = ${{ github.event.client_payload.pr_number }};
+            const domain = '${{ steps.info.outputs.domain }}';
+            const goNoGo = '${{ steps.audit.outputs.go_no_go }}';
+            const blockers = '${{ steps.audit.outputs.blockers }}';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            let emoji = '🟢';
+            if (goNoGo === 'RED') emoji = '🔴';
+            if (goNoGo === 'YELLOW') emoji = '🟡';
+            
+            const body = `## ${emoji} Javari AuditOps - Deploy Audit
+            
+            **Domain:** \`${domain}\`
+            **Status:** ${goNoGo}
+            **Blockers:** ${blockers}
+            
+            [View Full Report](${runUrl})
+            `;
+            
+            await github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Notify Slack
+        if: steps.audit.outputs.go_no_go == 'RED'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            DOMAIN="${{ steps.info.outputs.domain }}"
+            BLOCKERS="${{ steps.audit.outputs.blockers }}"
+            RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{
+                \"attachments\": [{
+                  \"color\": \"danger\",
+                  \"blocks\": [
+                    {
+                      \"type\": \"header\",
+                      \"text\": {\"type\": \"plain_text\", \"text\": \"🔴 Deploy Audit Failed\"}
+                    },
+                    {
+                      \"type\": \"section\",
+                      \"fields\": [
+                        {\"type\": \"mrkdwn\", \"text\": \"*Domain:* $DOMAIN\"},
+                        {\"type\": \"mrkdwn\", \"text\": \"*Blockers:* $BLOCKERS\"}
+                      ]
+                    },
+                    {
+                      \"type\": \"actions\",
+                      \"elements\": [
+                        {
+                          \"type\": \"button\",
+                          \"text\": {\"type\": \"plain_text\", \"text\": \"View Report\"},
+                          \"url\": \"$RUN_URL\",
+                          \"style\": \"danger\"
+                        }
+                      ]
+                    }
+                  ]
+                }]
+              }" \
+              $SLACK_WEBHOOK_URL
+          fi
+
+      - name: Trigger Javari AI if issues found
+        if: steps.audit.outputs.blockers > 0
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          echo "🤖 Notifying Javari AI of deployment issues..."
+          echo "Domain: ${{ steps.info.outputs.domain }}"
+          echo "Blockers: ${{ steps.audit.outputs.blockers }}"
+          
+          # Javari AI will automatically process the fix packet from Supabase
+          pnpm --filter @auditops/runner run generate-fix-packet
