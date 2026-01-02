@@ -1,0 +1,314 @@
+# =============================================================
+# JAVARI AUDITOPS - Scheduled Audit Workflows
+# Triggers: Nightly full, Hourly canary, Weekly deep
+# =============================================================
+
+name: AuditOps Scheduled Runs
+
+on:
+  schedule:
+    # Nightly full audit - 2 AM UTC (10 PM EST)
+    - cron: '0 2 * * *'
+    # Hourly canary - Every hour at :00
+    - cron: '0 * * * *'
+    # Weekly deep audit - Sunday 4 AM UTC
+    - cron: '0 4 * * 0'
+  
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      run_type:
+        description: 'Type of scheduled run to execute'
+        required: true
+        type: choice
+        options:
+          - nightly
+          - hourly
+          - weekly
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '9'
+
+jobs:
+  # =============================================================
+  # NIGHTLY FULL AUDIT
+  # Runs every night at 2 AM UTC
+  # Full crawl of all domains with all modules
+  # =============================================================
+  nightly-full:
+    name: Nightly Full Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event.schedule == '0 2 * * *' || (github.event_name == 'workflow_dispatch' && inputs.run_type == 'nightly')
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright
+        run: pnpm --filter @auditops/runner exec playwright install --with-deps chromium
+
+      - name: Generate auth state
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
+        run: pnpm --filter @auditops/runner run auth:generate
+
+      - name: Run nightly full audit
+        id: audit
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          echo "🌙 Starting nightly full audit..."
+          pnpm --filter @auditops/runner auditops run \
+            --env prod \
+            --scope full \
+            --triggered-by scheduled \
+            --maxRuntimeMinutes 90
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditops-nightly-${{ github.run_number }}
+          path: packages/runner/output/**
+          retention-days: 14
+
+      - name: Save to Supabase
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: pnpm --filter @auditops/runner run save-results
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"❌ Nightly audit failed! Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+              $SLACK_WEBHOOK_URL
+          fi
+
+  # =============================================================
+  # HOURLY CANARY
+  # Runs every hour
+  # Quick check on primary domains only
+  # =============================================================
+  hourly-canary:
+    name: Hourly Canary Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.schedule == '0 * * * *' || (github.event_name == 'workflow_dispatch' && inputs.run_type == 'hourly')
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright
+        run: pnpm --filter @auditops/runner exec playwright install --with-deps chromium
+
+      - name: Run canary audit
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          echo "🐤 Starting hourly canary check..."
+          pnpm --filter @auditops/runner auditops run \
+            --env prod \
+            --scope tier \
+            --tier primary \
+            --includeModules "crawlLinkIntegrity,seoMeta,securityHeaders" \
+            --triggered-by scheduled \
+            --maxRuntimeMinutes 10
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditops-canary-${{ github.run_number }}
+          path: packages/runner/output/**
+          retention-days: 3
+
+      - name: Save to Supabase
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: pnpm --filter @auditops/runner run save-results
+
+      - name: Alert on BLOCKER
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -f "packages/runner/output/report.json" ]; then
+            BLOCKERS=$(jq -r '.summary.BLOCKER // 0' packages/runner/output/report.json)
+            if [ "$BLOCKERS" -gt 0 ] && [ -n "$SLACK_WEBHOOK_URL" ]; then
+              curl -X POST -H 'Content-type: application/json' \
+                --data "{\"text\":\"🚨 BLOCKER detected in canary! $BLOCKERS blockers found. Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+                $SLACK_WEBHOOK_URL
+            fi
+          fi
+
+  # =============================================================
+  # WEEKLY DEEP AUDIT
+  # Runs every Sunday at 4 AM UTC
+  # Maximum depth crawl with all modules and high budgets
+  # =============================================================
+  weekly-deep:
+    name: Weekly Deep Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: github.event.schedule == '0 4 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.run_type == 'weekly')
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [primary, product, subdomain, apps]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright
+        run: pnpm --filter @auditops/runner exec playwright install --with-deps chromium
+
+      - name: Generate auth state
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
+        run: pnpm --filter @auditops/runner run auth:generate
+
+      - name: Run deep audit - ${{ matrix.tier }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          echo "🔬 Starting weekly deep audit for tier: ${{ matrix.tier }}..."
+          pnpm --filter @auditops/runner auditops run \
+            --env prod \
+            --scope tier \
+            --tier ${{ matrix.tier }} \
+            --triggered-by scheduled \
+            --crawlBudgetPages 2000 \
+            --crawlBudgetDepth 10 \
+            --maxRuntimeMinutes 45
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditops-weekly-${{ matrix.tier }}-${{ github.run_number }}
+          path: packages/runner/output/**
+          retention-days: 30
+
+      - name: Save to Supabase
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: pnpm --filter @auditops/runner run save-results
+
+  # =============================================================
+  # POST-AUDIT SUMMARY
+  # Aggregates results and notifies
+  # =============================================================
+  weekly-summary:
+    name: Weekly Summary
+    runs-on: ubuntu-latest
+    needs: weekly-deep
+    if: always() && (github.event.schedule == '0 4 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.run_type == 'weekly'))
+    
+    steps:
+      - name: Generate weekly summary
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          echo "📊 Generating weekly audit summary..."
+          
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{
+                \"blocks\": [
+                  {
+                    \"type\": \"header\",
+                    \"text\": {\"type\": \"plain_text\", \"text\": \"📊 Weekly Audit Summary\"}
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"text\": {\"type\": \"mrkdwn\", \"text\": \"Weekly deep audit completed for all tiers. Check the dashboard for full results.\"}
+                  },
+                  {
+                    \"type\": \"actions\",
+                    \"elements\": [
+                      {
+                        \"type\": \"button\",
+                        \"text\": {\"type\": \"plain_text\", \"text\": \"View Dashboard\"},
+                        \"url\": \"https://auditops.craudiovizai.com\"
+                      },
+                      {
+                        \"type\": \"button\",
+                        \"text\": {\"type\": \"plain_text\", \"text\": \"View Run\"},
+                        \"url\": \"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                      }
+                    ]
+                  }
+                ]
+              }" \
+              $SLACK_WEBHOOK_URL
+          fi
