@@ -62,7 +62,6 @@ jobs:
           VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
         run: |
           cd packages/runner
-          pnpm run build
           
           ARGS="--scope ${{ inputs.scope }}"
           
@@ -74,7 +73,8 @@ jobs:
             ARGS="$ARGS --domain ${{ inputs.domain }}"
           fi
           
-          pnpm run start $ARGS
+          # Use tsx to run TypeScript directly
+          pnpm exec tsx src/cli.ts run $ARGS
 
       - name: Upload report artifacts
         uses: actions/upload-artifact@v4
@@ -94,7 +94,7 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           if [ -f "packages/runner/output/report.json" ]; then
-            pnpm --filter @javari/runner run save-results || echo "No results to save"
+            cd packages/runner && pnpm exec tsx src/scripts/save-results.ts || echo "No results to save"
           fi
 
       - name: Generate fix packet for Javari AI
@@ -103,7 +103,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          pnpm --filter @javari/runner run fix-packet || echo "No fix packet generated"
+          cd packages/runner && pnpm exec tsx src/scripts/fix-packet.ts || echo "No fix packet generated"
 
   notify:
     name: Send Notifications
@@ -118,19 +118,9 @@ jobs:
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             STATUS="${{ needs.audit.result }}"
-            if [ "$STATUS" = "success" ]; then
-              EMOJI="✅"
-              COLOR="good"
-            else
-              EMOJI="❌"
-              COLOR="danger"
-            fi
-            
             curl -X POST "$SLACK_WEBHOOK_URL" \
               -H "Content-Type: application/json" \
-              -d "{\"attachments\":[{\"color\":\"$COLOR\",\"text\":\"$EMOJI AuditOps Manual Run: $STATUS\n• Scope: ${{ inputs.scope }}\n• Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}]}" || true
-          else
-            echo "Slack webhook not configured, skipping notification"
+              -d "{\"text\":\"AuditOps: $STATUS - ${{ inputs.scope }}\"}" || true
           fi
 
   autopilot:
@@ -142,10 +132,4 @@ jobs:
     steps:
       - name: Trigger Javari AI to process fix packet
         run: |
-          echo "Fix packet generated and saved to database."
-          echo "Javari AI will pick up pending fix packets on next run."
-          echo ""
-          echo "To manually trigger Javari AI processing:"
-          echo "  1. Go to craudiovizai.com/admin/auditops"
-          echo "  2. Click 'Process Fix Packets'"
-          echo "  3. Review and approve auto-fixes"
+          echo "Fix packet generated. Javari AI will process on next run."
