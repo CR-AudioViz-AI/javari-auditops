@@ -1,0 +1,59 @@
+name: Promote Deployment to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: 'Vercel Project ID'
+        required: true
+        default: 'prj_zxjzE2qvMWFWqV0AspGvago6aPV5'
+      deployment_id:
+        description: 'Deployment ID to promote'
+        required: true
+        default: 'dpl_5mA4Bx9qfKFMU5Ju11h4NPMVjSqd'
+      team_id:
+        description: 'Vercel Team ID'
+        required: true
+        default: 'team_Z0yef7NlFu1coCJWz8UmUdI5'
+
+jobs:
+  promote:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote deployment via Vercel API
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          echo "Promoting ${{ inputs.deployment_id }} to production..."
+          
+          RESPONSE=$(curl -s -X POST \
+            "https://api.vercel.com/v9/projects/${{ inputs.project_id }}/promote/${{ inputs.deployment_id }}?teamId=${{ inputs.team_id }}" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          
+          echo "Response: $RESPONSE"
+          
+          # Check for success
+          if echo "$RESPONSE" | grep -q '"error"'; then
+            echo "❌ Promotion failed"
+            echo "$RESPONSE"
+            exit 1
+          else
+            echo "✅ Promotion initiated successfully"
+          fi
+
+      - name: Verify production deployment
+        run: |
+          echo "Waiting 30 seconds for DNS/CDN propagation..."
+          sleep 30
+          
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://javariai.com/api/health)
+          echo "Production /api/health status: $STATUS"
+          
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ Production is healthy after promotion"
+          else
+            echo "⚠️  Production returned $STATUS — manual verification required"
+          fi
