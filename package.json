@@ -46,6 +46,7 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "typescript": "^5",
-    "@types/react-dom": "^18"
+    "@types/react-dom": "^18",
+    "@playwright/test": "^1.44.0"
   }
 }
