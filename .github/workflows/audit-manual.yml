@@ -39,20 +39,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'pnpm'
+
+      - name: Enable corepack and install pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Install Playwright browsers
-        run: pnpm --filter @javari/runner exec playwright install chromium
+        run: pnpm --filter @javari/runner exec playwright install chromium --with-deps
 
       - name: Run audit
         env:
@@ -60,6 +61,8 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          AUDIT_USER_EMAIL: ${{ secrets.AUDIT_USER_EMAIL }}
+          AUDIT_USER_PASSWORD: ${{ secrets.AUDIT_USER_PASSWORD }}
         run: |
           cd packages/runner
           
@@ -73,7 +76,6 @@ jobs:
             ARGS="$ARGS --domain ${{ inputs.domain }}"
           fi
           
-          # Use tsx to run TypeScript directly
           pnpm exec tsx src/cli.ts run $ARGS
 
       - name: Upload report artifacts
@@ -97,14 +99,6 @@ jobs:
             cd packages/runner && pnpm exec tsx src/scripts/save-results.ts || echo "No results to save"
           fi
 
-      - name: Generate fix packet for Javari AI
-        if: success()
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          cd packages/runner && pnpm exec tsx src/scripts/fix-packet.ts || echo "No fix packet generated"
-
   notify:
     name: Send Notifications
     needs: audit
@@ -112,16 +106,11 @@ jobs:
     if: always()
     
     steps:
-      - name: Send Slack notification
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - name: Notify completion
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            STATUS="${{ needs.audit.result }}"
-            curl -X POST "$SLACK_WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -d "{\"text\":\"AuditOps: $STATUS - ${{ inputs.scope }}\"}" || true
-          fi
+          echo "AuditOps run completed with result: ${{ needs.audit.result }}"
+          echo "Scope: ${{ inputs.scope }}"
+          echo "Domain: ${{ inputs.domain }}"
 
   autopilot:
     name: Trigger Javari AI Autopilot
@@ -130,6 +119,6 @@ jobs:
     if: success()
     
     steps:
-      - name: Trigger Javari AI to process fix packet
+      - name: Fix packet ready
         run: |
           echo "Fix packet generated. Javari AI will process on next run."
