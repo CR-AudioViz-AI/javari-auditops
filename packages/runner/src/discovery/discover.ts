@@ -196,7 +196,7 @@ function classifyDomain(domain: string): DomainConfig['tier'] {
   
   // Product domains (have their own TLD)
   if (!d.includes('.craudiovizai.com') && 
-      (d.includes('javari') || d.includes('crav'))) {
+      (d.includes('javari') || d.includes('javari'))) {
     return 'product';
   }
   

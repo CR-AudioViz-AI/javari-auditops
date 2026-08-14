@@ -100,7 +100,7 @@ https://javariinvoice.com
 https://javariphoto.com
 https://javariart.com
 https://orlandotripdeal.com
-https://cravcards.com
+https://javaricards.com
 ```
 
 ## 2.3 Subdomain Apps (Tier 3)
