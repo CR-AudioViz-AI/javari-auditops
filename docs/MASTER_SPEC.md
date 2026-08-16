@@ -1,3 +1,4 @@
+<!-- 2026-08-16: the Pride/LGBTQ app was permanently removed. The platform ships standard groups only; customers who want a group we do not offer can create one. Project deleted, domain detached, repo archived. -->
 # JAVARI AUDITOPS - MASTER SPECIFICATION
 ## Complete Technical & Business Specification
 ## Version 1.0.0 | January 2, 2026
@@ -155,7 +156,6 @@ https://community.craudiovizai.com
 https://nonprofits.craudiovizai.com
 https://rescue.craudiovizai.com
 https://accessibility.craudiovizai.com
-https://pride.craudiovizai.com
 https://green.craudiovizai.com
 
 # Government & Grants
